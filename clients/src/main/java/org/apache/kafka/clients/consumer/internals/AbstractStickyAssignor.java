@@ -72,6 +72,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
                                                     Map<String, Subscription> subscriptions) {
         Map<String, List<TopicPartition>> consumerToOwnedPartitions = new HashMap<>();
         Set<TopicPartition> partitionsWithMultiplePreviousOwners = new HashSet<>();
+        //判断所有consumer是否都订阅了相同topic
         if (allSubscriptionsEqual(partitionsPerTopic.keySet(), subscriptions, consumerToOwnedPartitions, partitionsWithMultiplePreviousOwners)) {
             log.debug("Detected that all consumers were subscribed to same set of topics, invoking the "
                           + "optimized assignment algorithm");
@@ -91,6 +92,9 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
      * {@code consumerToOwnedPartitions} with each consumer's previously owned and still-subscribed partitions,
      * and the {@code partitionsWithMultiplePreviousOwners} with any partitions claimed by multiple previous owners
      */
+    // 该方法用来判断是否所有的consumer 订阅关系都相同；
+    // 并且顺便填充 consumerToOwnedPartitions 和 partitionsWithMultiplePreviousOwners 两个容器
+    // 前者表示当前消费者拥有的分区分配关系；后者表示当前是否有一个分区分配给了不同的消费者
     private boolean allSubscriptionsEqual(Set<String> allTopics,
                                           Map<String, Subscription> subscriptions,
                                           Map<String, List<TopicPartition>> consumerToOwnedPartitions,
@@ -109,13 +113,17 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
             Subscription subscription = subscriptionEntry.getValue();
 
             // initialize the subscribed topics set if this is the first subscription
+            // 如果订阅列表为空 先初始化
             if (subscribedTopics.isEmpty()) {
                 subscribedTopics.addAll(subscription.topics());
             } else if (isAllSubscriptionsEqual && !(subscription.topics().size() == subscribedTopics.size()
                 && subscribedTopics.containsAll(subscription.topics()))) {
+                // => 该consumer订阅的topic数量和其他consumer不同 或者 该consumer订阅的topic不再其他consumer订阅的topic里
+                // => 说明不是所有consumer 订阅关系都相同
                 isAllSubscriptionsEqual = false;
             }
 
+            //创建该consumer的订阅信息
             MemberData memberData = memberData(subscription);
 
             List<TopicPartition> ownedPartitions = new ArrayList<>();
@@ -125,10 +133,12 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
             // generation, or it's generation is not present but we have not seen any known generation so far
             if (memberData.generation.isPresent() && memberData.generation.get() >= maxGeneration
                 || !memberData.generation.isPresent() && maxGeneration == DEFAULT_GENERATION) {
+                // 获取目前最大代的分区分配方案 保存到
 
                 // If the current member's generation is higher, all the previously owned partitions are invalid
+                //如果该消费者 大于 目前已知最大代;需要更新最大代 且之前最大代的数据需要清空
                 if (memberData.generation.isPresent() && memberData.generation.get() > maxGeneration) {
-                    allPreviousPartitionsToOwner.clear();
+                    allPreviousPartitionsToOwner.clear(); //清理旧的代的分配数据
                     partitionsWithMultiplePreviousOwners.clear();
                     for (String droppedOutConsumer : membersOfCurrentHighestGeneration) {
                         consumerToOwnedPartitions.get(droppedOutConsumer).clear();
@@ -139,14 +149,16 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
                 }
 
                 membersOfCurrentHighestGeneration.add(consumer);
+
                 for (final TopicPartition tp : memberData.partitions) {
                     // filter out any topics that no longer exist or aren't part of the current subscription
                     if (allTopics.contains(tp.topic())) {
 
-                        if (!allPreviousPartitionsToOwner.containsKey(tp)) {
+                        if (!allPreviousPartitionsToOwner.containsKey(tp)) { //未记录这个分区的分配信息
                             allPreviousPartitionsToOwner.put(tp, consumer);
                             ownedPartitions.add(tp);
                         } else {
+                            //说明一个分区在同代中被分配了两次
                             String otherConsumer = allPreviousPartitionsToOwner.get(tp);
                             log.error("Found multiple consumers {} and {} claiming the same TopicPartition {} in the "
                                 + "same generation {}, this will be invalidated and removed from their previous assignment.",
@@ -390,7 +402,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
 
         Map<TopicPartition, ConsumerGenerationPair> prevAssignment = new HashMap<>();
         partitionMovements = new PartitionMovements();
-
+        //预填充之前的分配方案 (current的上一代)
         prepopulateCurrentAssignments(subscriptions, prevAssignment);
 
         // a mapping of all topics to all consumers that can be assigned to them
@@ -407,8 +419,8 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
             List<String> subscribedTopics = new ArrayList<>(entry.getValue().topics().size());
             consumer2AllPotentialTopics.put(consumerId, subscribedTopics);
             entry.getValue().topics().stream().filter(topic -> partitionsPerTopic.get(topic) != null).forEach(topic -> {
-                subscribedTopics.add(topic);
-                topic2AllPotentialConsumers.get(topic).add(consumerId);
+                subscribedTopics.add(topic); //记录消费者和topic的所有订阅订阅关系
+                topic2AllPotentialConsumers.get(topic).add(consumerId); //记录topic和所有消费的订阅关系
             });
 
             // add this consumer to currentAssignment (with an empty topic partition assignment) if it does not already exist
@@ -417,50 +429,58 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         }
 
         // a mapping of partition to current consumer
-        Map<TopicPartition, String> currentPartitionConsumer = new HashMap<>();
+        Map<TopicPartition, String> currentPartitionConsumer = new HashMap<>(); //当前 分区和消费者的映射关系
         for (Map.Entry<String, List<TopicPartition>> entry: currentAssignment.entrySet())
             for (TopicPartition topicPartition: entry.getValue())
                 currentPartitionConsumer.put(topicPartition, entry.getKey());
 
         int totalPartitionsCount = partitionsPerTopic.values().stream().reduce(0, Integer::sum);
+
+        //按topic消费实例数排序
         List<String> sortedAllTopics = new ArrayList<>(topic2AllPotentialConsumers.keySet());
         Collections.sort(sortedAllTopics, new TopicComparator(topic2AllPotentialConsumers));
+
+        //获取全部topic分区信息
         List<TopicPartition> sortedAllPartitions = getAllTopicPartitions(partitionsPerTopic, sortedAllTopics, totalPartitionsCount);
 
         // the partitions already assigned in current assignment
         List<TopicPartition> assignedPartitions = new ArrayList<>();
         boolean revocationRequired = false;
+        //遍历当前分配方案
         for (Iterator<Entry<String, List<TopicPartition>>> it = currentAssignment.entrySet().iterator(); it.hasNext();) {
+
             Map.Entry<String, List<TopicPartition>> entry = it.next();
             Subscription consumerSubscription = subscriptions.get(entry.getKey());
-            if (consumerSubscription == null) {
+            if (consumerSubscription == null) { //TODO  什么情况下会走到这个分支
                 // if a consumer that existed before (and had some partition assignments) is now removed, remove it from currentAssignment
                 for (TopicPartition topicPartition: entry.getValue())
                     currentPartitionConsumer.remove(topicPartition);
                 it.remove();
             } else {
                 // otherwise (the consumer still exists)
+
                 for (Iterator<TopicPartition> partitionIter = entry.getValue().iterator(); partitionIter.hasNext();) {
                     TopicPartition partition = partitionIter.next();
-                    if (!topic2AllPotentialConsumers.containsKey(partition.topic())) {
+                    if (!topic2AllPotentialConsumers.containsKey(partition.topic())) { //订阅这个topic的消费者不存在 从分配方案中移除
                         // if this topic partition of this consumer no longer exists, remove it from currentAssignment of the consumer
                         partitionIter.remove();
                         currentPartitionConsumer.remove(partition);
-                    } else if (!consumerSubscription.topics().contains(partition.topic())) {
+                    } else if (!consumerSubscription.topics().contains(partition.topic())) { //说明消费者不再订阅这个topic
                         // because the consumer is no longer subscribed to its topic, remove it from currentAssignment of the consumer
                         partitionIter.remove();
                         revocationRequired = true;
-                    } else {
+                    } else { //说明consumer仍然存在 且 仍订阅这个topic
                         // otherwise, remove the topic partition from those that need to be assigned only if
                         // its current consumer is still subscribed to its topic (because it is already assigned
                         // and we would want to preserve that assignment as much as possible)
-                        assignedPartitions.add(partition);
+                        assignedPartitions.add(partition); //添加到已分配的列表中
                     }
                 }
             }
         }
 
         // all partitions that needed to be assigned
+        //获取未分配的分区
         List<TopicPartition> unassignedPartitions = getUnassignedPartitions(sortedAllPartitions, assignedPartitions, topic2AllPotentialConsumers);
 
         if (log.isDebugEnabled()) {
@@ -475,6 +495,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         TreeSet<String> sortedCurrentSubscriptions = new TreeSet<>(new SubscriptionComparator(currentAssignment));
         sortedCurrentSubscriptions.addAll(currentAssignment.keySet());
 
+        //平衡分区分配
         balance(currentAssignment, prevAssignment, sortedAllPartitions, unassignedPartitions, sortedCurrentSubscriptions,
             consumer2AllPotentialTopics, topic2AllPotentialConsumers, currentPartitionConsumer, revocationRequired,
             partitionsPerTopic, totalPartitionsCount);
@@ -772,6 +793,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         }
     }
 
+    //有多个consumer 订阅了这个主题 说明这个topic可参与重分配
     private boolean canParticipateInReassignment(String topic,
                                                  Map<String, List<String>> topic2AllPotentialConsumers) {
         // if a topic has two or more potential consumers it is subject to reassignment.
@@ -787,21 +809,25 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         List<TopicPartition> currentPartitions = currentAssignment.get(consumer);
         int currentAssignmentSize = currentPartitions.size();
         List<String> allSubscribedTopics = consumer2AllPotentialTopics.get(consumer);
+        //最大可分配数 => consumer订阅的主题的分区数之和
         int maxAssignmentSize = getMaxAssignmentSize(totalPartitionCount, allSubscribedTopics, partitionsPerTopic);
 
         if (currentAssignmentSize > maxAssignmentSize)
             log.error("The consumer {} is assigned more partitions than the maximum possible.", consumer);
 
+        //owned < 最大可分配数
         if (currentAssignmentSize < maxAssignmentSize)
             // if a consumer is not assigned all its potential partitions it is subject to reassignment
             return true;
 
+        //说明owned == 最大可分配数
         for (TopicPartition partition: currentPartitions)
             // if any of the partitions assigned to a consumer is subject to reassignment the consumer itself
             // is subject to reassignment
+            // 如果订阅的主题还有机会分配给其他consumer 则返回true
             if (canParticipateInReassignment(partition.topic(), topic2AllPotentialConsumers))
                 return true;
-
+        //说明这个consumer无法在参与重分配了
         return false;
     }
 
@@ -822,6 +848,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         boolean initializing = currentAssignment.get(sortedCurrentSubscriptions.last()).isEmpty();
 
         // assign all unassigned partitions
+        // 先非配unassigned的分区
         for (TopicPartition partition: unassignedPartitions) {
             // skip if there is no potential consumer for the topic
             if (topic2AllPotentialConsumers.get(partition.topic()).isEmpty())
@@ -832,6 +859,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         }
 
         // narrow down the reassignment scope to only those partitions that can actually be reassigned
+        // 将重新分配的范围控制在 能参与重分配的分区中(至少有2个消费者订阅了该主题)
         Set<TopicPartition> fixedPartitions = new HashSet<>();
         for (String topic: topic2AllPotentialConsumers.keySet())
             if (!canParticipateInReassignment(topic, topic2AllPotentialConsumers)) {
@@ -840,32 +868,40 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
                 }
             }
         sortedPartitions.removeAll(fixedPartitions);
-        unassignedPartitions.removeAll(fixedPartitions);
+        unassignedPartitions.removeAll(fixedPartitions); //TODO 为何先添加在narrow down
 
         // narrow down the reassignment scope to only those consumers that are subject to reassignment
+        // 将重新分配的范围控制在 能参与重分配的消费者中(消费者拥有的分区数小于最大分区数 或者消费拥有的分区能参与重分配)
         Map<String, List<TopicPartition>> fixedAssignments = new HashMap<>();
         for (String consumer: consumer2AllPotentialTopics.keySet())
             if (!canParticipateInReassignment(consumer, currentAssignment,
                 consumer2AllPotentialTopics, topic2AllPotentialConsumers, partitionsPerTopic, totalPartitionCount)) {
+                //从已排序的订阅关系中移除 sortedCurrentSubscriptions的数据 后面会被用于reassign
                 sortedCurrentSubscriptions.remove(consumer);
+                //记录不能参与重分配的消费者和其拥有的分区
                 fixedAssignments.put(consumer, currentAssignment.remove(consumer));
             }
 
         // create a deep copy of the current assignment so we can revert to it if we do not get a more balanced assignment later
+        //拷贝一份当前分配方案 万一重分配后 效果不好，用来还原
         Map<String, List<TopicPartition>> preBalanceAssignment = deepCopy(currentAssignment);
         Map<TopicPartition, String> preBalancePartitionConsumers = new HashMap<>(currentPartitionConsumer);
 
         // if we don't already need to revoke something due to subscription changes, first try to balance by only moving newly added partitions
+        //如果没有订阅关系改变 先重分配unassigned的分区
         if (!revocationRequired) {
             performReassignments(unassignedPartitions, currentAssignment, prevAssignment, sortedCurrentSubscriptions,
                 consumer2AllPotentialTopics, topic2AllPotentialConsumers, currentPartitionConsumer, partitionsPerTopic, totalPartitionCount);
         }
 
+        //重新分配全部的分区
         boolean reassignmentPerformed = performReassignments(sortedPartitions, currentAssignment, prevAssignment, sortedCurrentSubscriptions,
             consumer2AllPotentialTopics, topic2AllPotentialConsumers, currentPartitionConsumer, partitionsPerTopic, totalPartitionCount);
 
         // if we are not preserving existing assignments and we have made changes to the current assignment
         // make sure we are getting a more balanced assignment; otherwise, revert to previous assignment
+
+        // 比较重新分配前后二者的得分 如果之前方案更好 则重新拷贝之前的方案
         if (!initializing && reassignmentPerformed && getBalanceScore(currentAssignment) >= getBalanceScore(preBalanceAssignment)) {
             deepCopy(preBalanceAssignment, currentAssignment);
             currentPartitionConsumer.clear();
@@ -873,6 +909,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         }
 
         // add the fixed assignments (those that could not change) back
+        // 重新添加回数据 这部分数据虽然不需要参与重分配 但是仍是最后分配方案的一部分
         for (Entry<String, List<TopicPartition>> entry: fixedAssignments.entrySet()) {
             String consumer = entry.getKey();
             currentAssignment.put(consumer, entry.getValue());
@@ -882,6 +919,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
         fixedAssignments.clear();
     }
 
+    // 尽量让每个消费者分配到的分区数平衡
     private boolean performReassignments(List<TopicPartition> reassignablePartitions,
                                          Map<String, List<TopicPartition>> currentAssignment,
                                          Map<TopicPartition, ConsumerGenerationPair> prevAssignment,
@@ -913,6 +951,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
                 if (consumer == null)
                     log.error("Expected partition '{}' to be assigned to a consumer", partition);
 
+                // 在本次分配方案中 该分区当前消费者拥有的分区数 > 该分区上次消息者拥有的分区数; 重新将该分区分配给上次的消费者 ？？
                 if (prevAssignment.containsKey(partition) &&
                     currentAssignment.get(consumer).size() > currentAssignment.get(prevAssignment.get(partition).consumer).size() + 1) {
                     reassignPartition(partition, currentAssignment, sortedCurrentSubscriptions, currentPartitionConsumer, prevAssignment.get(partition).consumer);
@@ -922,6 +961,7 @@ public abstract class AbstractStickyAssignor extends AbstractPartitionAssignor {
                 }
 
                 // check if a better-suited consumer exist for the partition; if so, reassign it
+                //本次分配方案中，该分区的消费者拥有的分区数 大于其他消费者拥有的分区数；重新分配
                 for (String otherConsumer: topic2AllPotentialConsumers.get(partition.topic())) {
                     if (currentAssignment.get(consumer).size() > currentAssignment.get(otherConsumer).size() + 1) {
                         reassignPartition(partition, currentAssignment, sortedCurrentSubscriptions, currentPartitionConsumer, consumer2AllPotentialTopics);

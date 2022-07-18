@@ -107,7 +107,7 @@ public class CooperativeStickyAssignor extends AbstractStickyAssignor {
         Map<TopicPartition, String> partitionsTransferringOwnership = super.partitionsTransferringOwnership == null ?
             computePartitionsTransferringOwnership(subscriptions, assignments) :
             super.partitionsTransferringOwnership;
-
+        //从分配方案中去掉 需要先取消 再分配的分区
         adjustAssignment(assignments, partitionsTransferringOwnership);
         return assignments;
     }
@@ -120,23 +120,28 @@ public class CooperativeStickyAssignor extends AbstractStickyAssignor {
         }
     }
 
+    //统计归属关系改变的分区和消费者
     private Map<TopicPartition, String> computePartitionsTransferringOwnership(Map<String, Subscription> subscriptions,
                                                                                Map<String, List<TopicPartition>> assignments) {
         Map<TopicPartition, String> allAddedPartitions = new HashMap<>();
         Set<TopicPartition> allRevokedPartitions = new HashSet<>();
 
+        //遍历消费者
         for (final Map.Entry<String, List<TopicPartition>> entry : assignments.entrySet()) {
             String consumer = entry.getKey();
 
             List<TopicPartition> ownedPartitions = subscriptions.get(consumer).ownedPartitions();
             List<TopicPartition> assignedPartitions = entry.getValue();
 
+
             Set<TopicPartition> ownedPartitionsSet = new HashSet<>(ownedPartitions);
+            //新分配的且之前没拥有的分区 =>说明是新增的，放到allAddedPartitions中
             for (TopicPartition tp : assignedPartitions) {
                 if (!ownedPartitionsSet.contains(tp))
                     allAddedPartitions.put(tp, consumer);
             }
 
+            //之前拥有的且这次没分配 =>说明是取消的，放到allRevokedPartitions中
             Set<TopicPartition> assignedPartitionsSet = new HashSet<>(assignedPartitions);
             for (TopicPartition tp : ownedPartitions) {
                 if (!assignedPartitionsSet.contains(tp))
@@ -144,6 +149,7 @@ public class CooperativeStickyAssignor extends AbstractStickyAssignor {
             }
         }
 
+        // 二者的交集说明该分区 是从一个消费者中取消后 重新 分配给 另一个消费者
         allAddedPartitions.keySet().retainAll(allRevokedPartitions);
         return allAddedPartitions;
     }

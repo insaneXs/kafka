@@ -621,6 +621,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // collect all the owned partitions
         Map<String, List<TopicPartition>> ownedPartitions = new HashMap<>();
 
+        // 所有consumer当前的订阅关系
         for (JoinGroupResponseData.JoinGroupResponseMember memberSubscription : allSubscriptions) {
             Subscription subscription = ConsumerProtocol.deserializeSubscription(ByteBuffer.wrap(memberSubscription.metadata()));
             subscription.setGroupInstanceId(Optional.ofNullable(memberSubscription.groupInstanceId()));

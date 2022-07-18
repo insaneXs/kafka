@@ -62,7 +62,7 @@ public abstract class AbstractPartitionAssignor implements ConsumerPartitionAssi
             else
                 log.debug("Skipping assignment for topic {} since no metadata is available", topic);
         }
-
+        //输出初步分配结果
         Map<String, List<TopicPartition>> rawAssignments = assign(partitionsPerTopic, subscriptions);
 
         // this class maintains no user data, so just wrap the results
